@@ -1,0 +1,19 @@
+{
+    "files.associations": {
+        "chrono": "cpp",
+        "ctime": "cpp",
+        "array": "cpp",
+        "string_view": "cpp",
+        "initializer_list": "cpp",
+        "utility": "cpp",
+        "string": "cpp",
+        "*.tcc": "cpp",
+        "vector": "cpp",
+        "deque": "cpp",
+        "unordered_map": "cpp",
+        "unordered_set": "cpp",
+        "memory": "cpp",
+        "random": "cpp"
+    },
+    "editor.mouseWheelZoom": true
+}
