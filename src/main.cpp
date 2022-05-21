@@ -1,323 +1,358 @@
-#include "Button/Button.h"
-#include "DisplayHelper/CustomFonts.h"
-#include "DisplayHelper/DisplayHelper.h"
-#include "Led/Led.h"
-#include "ProjectDataType.h"
 #include "ProjectSetting.h"
-#include "SerialMp3Player/SerialMP3Player.h"
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-#include <Arduino.h>
-#include <ArduinoJson.h>
-#include <ArduinoOTA.h>
-#include <ESP32Time.h>
-#include <ESPmDNS.h>
-#include <HTTPClient.h>
-#include <ParenthLogger.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
-#include <esp_task_wdt.h>
-#define __DATE_F__ "%B %d %Y"
-#define __TIME_F__ "%H:%M:%S"
 
-// ========================================================================== //
-// assets
-const SoundTask tasks[] = {
-    //! manual sort needed
-    {{8, 0, 0}, 1, 10, "morning event"},
-    {{8, 15, 0}, 2, 10, "after morning event"},
-    {{8, 30, 0}, 3, 10, "class 1"},
-    {{9, 30, 0}, 4, 10, "class 2"},
-    {{10, 30, 0}, 5, 10, "class 3"},
-    {{11, 30, 0}, 5, 10, "launch"},
-    {{12, 30, 0}, 6, 10, "class 4"},
-    {{13, 30, 0}, 7, 10, "class 5"},
-    {{14, 30, 0}, 8, 10, "class 6"},
-    {{15, 30, 0}, 9, 10, "class 7"},
-    {{16, 30, 0}, 10, 10, "class 7"},
-    {{17, 0, 0}, 11, 5, "school end"}};
-const uint16_t taskLen = sizeof(tasks) / sizeof(tasks[0]);
-uint16_t taskIndex = 0;
-ESP32Time rtc;
+namespace DEVICES {
+// LED
+Led errorLed(PIN_LED_ERR);
+// BUTTON
+Button topButton(PIN_BUTTON_TOP);
+Button midButton(PIN_BUTTON_MID);
+Button botButton(PIN_BUTTON_BOT);
+// MP3
 SerialMP3Player mp3;
-Led errorLed(PIN_LED_1);
-Button topButton(PIN_BUTTON_1);
-Button midButton(PIN_BUTTON_2);
-Button botButton(PIN_BUTTON_3);
-Adafruit_SSD1306 ssd(128, 32, &Wire, -1, 400000UL, 100000UL);
+// SSD1306
+Adafruit_SSD1306 ssd(SSD_WIDTH, SSD_HEIGHT, &Wire, -1, 400000UL, 100000UL);
 DisplayHelper display(&ssd);
-/* mode handler */
-void (*mode_service)();
-void (*mode_setup)();
-namespace render_setup {
-void layout() {
-    display.clearBuffer();
-    ssd.fillRect(0, 0, 127, 8, __WHITE__);
-    // print key
-    display.add("MODE :", 5, 6, __BLACK__, 1);
-    display.add("SSID :", 5, 17, __WHITE__, 1);
-    display.add("IP   :", 5, 25, __WHITE__, 1);
-    display.render();
+void setup() {
+    Serial.begin(MONITOR_SPEED);
+    // Led
+    errorLed.setup();
+    // Buttons
+    topButton.setup();
+    midButton.setup();
+    botButton.setup();
+    // MP3
+    mp3.begin(MP3_SPEED);
+    mp3.sendCommand(CMD_SEL_DEV, 0, 2);
+    mp3.setVol(MP3_VOL);
+    // SSD1306
+    ssd.begin(SSD1306_SWITCHCAPVCC, SSD_ADDR);
+    ssd.setTextWrap(false);
+    display.clear().render();
 }
-void update_mode(const char *text) {
-    String printValue = text;
-    printValue.toUpperCase();
-    display.add(printValue.c_str(), 35, 6, __BLACK__, 1);
-    display.render();
-}
-void update_ssid() {
-    String printString = WIFI_SSID;
-    printString.toUpperCase();
-    display.add(printString.c_str(), 35, 17, __WHITE__, 1);
-    display.render();
-}
-void update_ip(const char *ip) {
-    display.add(ip, 35, 25, __WHITE__, 1);
-    display.render();
-}
-}; // namespace render_setup
-// ========================================================================== //
-// [prototype] normal mode
-void normal_mode_setup();
-void normal_mode_service();
-stamp_t nms_i = 1000;
-stamp_t nms_ts;
-stamp_t play_i = 0;
-stamp_t play_ts;
+} // namespace DEVICES
+
+namespace PLAYER {
+int tasksIndex = 0;
 bool muted = false;
-bool shown = false;
-namespace render_normal {
-void layout() {
-    display.clearBuffer();
-    display.add("IP:", 4, 17, __WHITE__, 1);
-    display.add("NEXT:", 4, 27, __WHITE__, 1);
-    display.render();
+bool displayed = true;
+stamp_t playTimeStamp, playIntervals;
+void play() {
+    // send play command
+    DEVICES::mp3.play(tasks[tasksIndex].index);
+    // update play variables
+    playTimeStamp = millis();
+    playIntervals = (tasks[tasksIndex].duration);
 }
-void update_ip(const char *ip) {
-    // clear feild
-    ssd.fillRect(31, 13, 127, 5, __BLACK__);
-    // add
-    display.add(ip, 31, 17, __WHITE__, 1);
-    display.render();
+void stop() {
+    // send stop command
+    DEVICES::mp3.stop();
+    // update play variable
+    playIntervals = 0;
 }
-void update_date(const char *date) {
-    ssd.fillRect(4, 3, 127, 5, __BLACK__);
-    String printValue = date;
-    printValue.toUpperCase();
-    display.add(printValue.c_str(), 4, 7, __WHITE__, 1);
-    display.render();
+void handle_check_stop() {
+    if (millis() - playTimeStamp >= playIntervals && playIntervals != 0) {
+        stop();
+    }
 }
-void update_time(const char *time) {
-    ssd.fillRect(90, 3, 127, 5, __BLACK__);
-    display.add(time, 90, 7, __WHITE__, 1);
-    display.render();
+}; // namespace PLAYER
+
+namespace CLOCK {
+ESP32Time rtc;
+Time getTime() {
+    return {rtc.getHour(true), rtc.getMinute(), rtc.getSecond()};
 }
-void update_next(const char *name) {
-    ssd.fillRect(31, 23, 127, 5, __BLACK__);
-    String printValue = name;
-    printValue.toUpperCase();
-    display.add(printValue.c_str(), 31, 27, __WHITE__, 1);
-    display.render();
+}; // namespace CLOCK
+
+namespace AUTO_MODE {
+stamp_t handleStamp, handlePeriod = 1000;
+DisplayPosition timePos, nextPos, nextTimePos;
+void render_static() {
+    DEVICES::display
+        .clear()
+        .prop(COLOR_WHITE, 1)
+        .at(0, 0)
+        .add("AUTO @ ");
+    timePos = DEVICES::display.getPos();
+    DEVICES::display
+        .addNewLine("IP: ")
+        .add(WiFi.localIP().toString().c_str())
+        .addNewLine("NXT: ");
+    nextPos = DEVICES::display.getPos();
+    DEVICES::display
+        .addNewLine("NXT@: ")
+        .render();
+    nextTimePos = DEVICES::display.getPos();
 }
-}; // namespace render_normal
-// ========================================================================== //
-// [prototype] debug mode
-void debug_mode_setup();
-void debug_mode_service();
-stamp_t dms_i = 1000;
-stamp_t dms_ts;
-bool played = false;
-namespace render_debug {
-void layout() {
-    display.clearBuffer();
-    ssd.fillRect(0, 0, 127, 8, __WHITE__);
-    display.add("DEBUG-PLAYING", 31, 6, __BLACK__, 1);
-    display.add("NOW : ", 2, 16, __WHITE__, 1);
-    display.add("STA : ", 2, 25, __WHITE__, 1);
-    display.render();
+void render_time() {
+    DEVICES::ssd.fillRect(timePos.x, timePos.y, 128, 8, COLOR_BLACK);
+    DEVICES::display
+        .at(timePos)
+        .add(CLOCK::rtc.getTime(__TIME_F__).c_str())
+        .render();
 }
-void update_index(uint8_t index) {
-    String printValue = tasks[index].name;
-    printValue.toUpperCase();
-    // clear field
-    ssd.fillRect(26, 12, 127, 5, __BLACK__);
-    // add
-    display.add(printValue.c_str(), 26, 16, __WHITE__, 1);
-    display.render();
+void render_next() {
+    // render next-name
+    DEVICES::ssd.fillRect(nextPos.x, nextPos.y, 128, 8, COLOR_BLACK);
+    DEVICES::display
+        .at(nextPos)
+        .add(tasks[PLAYER::tasksIndex].name)
+        .render();
+    // render next-time
+    DEVICES::ssd.fillRect(nextTimePos.x, nextTimePos.y, 128, 8, COLOR_BLACK);
+    Time &t = tasks[PLAYER::tasksIndex].time;
+    DEVICES::display
+        .at(nextTimePos)
+        .add(t.hr)(':')(t.min)(':')(t.sec)
+        .render();
 }
-void update_status(bool played) {
-    ssd.fillRect(26, 21, 127, 5, __BLACK__);
-    display.add((played) ? "PLAY" : "PAUSE", 26, 25, __WHITE__, 1);
-    display.render();
+void handle_check_buttons() {
+    if (DEVICES::topButton.read() == LOW) { // top(stop) button
+        delay(250);
+        PLAYER::stop();
+    }
+    if (DEVICES::midButton.read() == LOW) { // mid(mute/unmute) button
+        delay(250);
+        PLAYER::muted = !PLAYER::muted;
+        if (PLAYER::muted) {
+            DEVICES::errorLed.on();
+        } else {
+            DEVICES::errorLed.off();
+        }
+        PLAYER::stop();
+    }
+    if (DEVICES::botButton.read() == LOW) { // bot(show/unshow) button
+        delay(250);
+        PLAYER::displayed = !PLAYER::displayed;
+        if (PLAYER::displayed) {
+            render_static();
+            render_time();
+            render_next();
+        } else {
+            DEVICES::display.clear().render();
+        }
+    }
 }
-}; // namespace render_debug
-// ========================================================================== //
-// [prototype] ota
-void ota_setup();
-void ota_service();
-// ========================================================================== //
-// [prototype] helper
-void clock_update();
-Time get_current_time();
-void plog_task_table();
-void stop_task();
-// ========================================================================== //
-// [definitions] normal mode
-void normal_mode_setup() {
-    // clear screen for screen saving
-    display.clearBuffer();
-    display.render();
-    plog("\n* normal-mode setup");
-    clock_update();
-    plog.use("\n* current date(%i) time(%i)")
-        .print(rtc.getTime(__DATE_F__).c_str(), green)
-        .print(rtc.getTime(__TIME_F__).c_str(), green);
+void handle_check_play(Time &current) {
+    // print value
+    Serial.print("\033[2J\033[H");
+    SoundTask &task = tasks[PLAYER::tasksIndex];
+    plog.use("\n* auto <%i> [%i:%i:%i] : %i @ [%i:%i]", yellow)
+        .print(B2OPTS(PLAYER::muted, "muted", "unmuted"), (PLAYER::muted) ? red : green)
+        .print(current.hr, blue)(current.min, blue)(current.sec, blue)
+        .print(task.name, blue)(task.time.hr, blue)(task.time.min, blue);
+    // check to play
+    bool insideWorkTime = (current >= tasks[0].time && current <= tasks[tasksLength - 1].time);
+    if (insideWorkTime && current >= tasks[PLAYER::tasksIndex].time) {
+        if (!PLAYER::muted) {
+            PLAYER::play();
+        }
+        PLAYER::tasksIndex = (PLAYER::tasksIndex + 1) % tasksLength;
+        // update next-task on screen
+        if (PLAYER::displayed) {
+            render_next();
+        }
+    }
+}
+void setup() {
+    render_static();
+    // update clock
+    plog.use("\n* update clock [%i] : %i", yellow)(TIME_SERVER, blue);
+    HTTPClient http;
+    http.begin(TIME_SERVER);
+    for (size_t i = 0; i < TIME_SERVER_ATTEMP; i++) {
+        if (http.GET() == 200) {
+            break;
+        }
+    }
+    StaticJsonDocument<512> doc;
+    deserializeJson(doc, http.getString());
+    CLOCK::rtc.setTime(
+        doc["seconds"],
+        doc["minute"],
+        doc["hour"],
+        doc["day"],
+        doc["month"],
+        doc["year"]);
+    plog(CLOCK::rtc.getTime(__TIME_F__).c_str(), blue);
+    render_time();
     // find next task
-    Time current = get_current_time();
-    if (current >= tasks[0].time && current < tasks[taskLen - 1].time) {
-        for (size_t i = 0; i < taskLen; i++) {
+    plog.use("\n* next sound-task : %i @ %i:%i", yellow);
+    Time current = CLOCK::getTime();
+    if (current >= tasks[0].time && current < tasks[tasksLength - 1].time) {
+        for (size_t i = 0; i < tasksLength; i++) {
             if (current < tasks[i].time) {
-                taskIndex = i;
+                PLAYER::tasksIndex = i;
                 break;
             }
         }
     }
+    SoundTask &task = tasks[PLAYER::tasksIndex];
+    plog(task.name, blue)(task.time.hr, blue)(task.time.min, blue);
+    render_next();
 }
-void normal_mode_service() {
-    /* core service */
-    //=> start-playing service
-    if (millis() - nms_ts >= nms_i) {
-        nms_ts = millis();
-
+void handle() {
+    if (millis() - handleStamp >= handlePeriod) {
+        handleStamp = millis();
+        Time time = CLOCK::getTime();
+        handle_check_play(time);
         // update time on screen
-        if (shown) {
-            render_normal::update_date(rtc.getTime(__DATE_F__).c_str());
-            render_normal::update_time(rtc.getTime(__TIME_F__).c_str());
+        if (PLAYER::displayed) {
+            render_time();
         }
+    }
+    PLAYER::handle_check_stop();
+    handle_check_buttons();
+}
+}; // namespace AUTO_MODE
 
-        Time current = get_current_time();
-        plog.use("\n* rtc (%i:%i:%i) => (%i)")
-            .print(current.hr, green)
-            .print(current.min, green)
-            .print(current.sec, green)
-            .print(current.toSec(), blue);
-        plog_task_table();
-        // check to play task
-        bool insideWorkTime = (current >= tasks[0].time && current <= tasks[taskLen - 1].time);
-        if (insideWorkTime && current >= tasks[taskIndex].time) {
-            if (!muted) {
-                // play task
-                mp3.play(tasks[taskIndex].index);
-                play_ts = millis();
-                play_i = (tasks[taskIndex].dura_sec * 1000);
-            }
-            // update index
-            taskIndex = (taskIndex + 1) % taskLen;
-        }
-    }
-    //=> stop-playing service
-    if (millis() - play_ts >= play_i && play_i != 0) {
-        stop_task();
-    }
-
-    /* side service */
-    //=> manual stop
-    if (topButton.read() == LOW) { // pushed top button
-        stop_task();
-    }
-    //=> mute
-    if (midButton.read() == LOW) { // pushed mid button
-        // mute
-        muted = !muted;
-        if (muted) {
-            errorLed.on();
+namespace MANUAL_MODE {
+DisplayPosition nextPos, statPos;
+void render_static() {
+    DEVICES::display
+        .clear()
+        .prop(COLOR_WHITE, 1)
+        .at(0, 0)
+        .add("MANUAL")
+        .addNewLine("IP: ")
+        .add(WiFi.localIP().toString().c_str())
+        .addNewLine("CUR: ");
+    nextPos = DEVICES::display.getPos();
+    DEVICES::display.addNewLine("STA: ");
+    statPos = DEVICES::display.getPos();
+    DEVICES::display.render();
+}
+void render_next() {
+    DEVICES::ssd.fillRect(nextPos.x, nextPos.y, 128, 8, COLOR_BLACK);
+    DEVICES::display
+        .at(nextPos)
+        .add(tasks[PLAYER::tasksIndex].name)
+        .render();
+}
+void render_play_stat() {
+    DEVICES::ssd.fillRect(statPos.x, statPos.y, 128, 8, COLOR_BLACK);
+    DEVICES::display
+        .at(statPos)
+        .add((PLAYER::playIntervals == 0) ? "STOP" : "PLAY")
+        .render();
+}
+void plog_manual() {
+    SoundTask &task = tasks[PLAYER::tasksIndex];
+    plog.use("\n* manual <%i>: %i @ [%i:%i]")
+        .print((PLAYER::playIntervals) ? "play" : "stop", (PLAYER::playIntervals) ? green : red)
+        .print(task.name, blue)(task.time.hr, blue)(task.time.min, blue);
+}
+void handle_check_buttons() {
+    if (DEVICES::topButton.read() == LOW) { // top(play/stop) button
+        if (PLAYER::playIntervals != 0) {
+            PLAYER::stop();
         } else {
-            errorLed.off();
+            PLAYER::play();
         }
-        stop_task();
+        render_play_stat();
+        plog_manual();
+        delay(250);
     }
-    //=> display infomation
-    if (botButton.read() == LOW) { // pushed bottom button
-        if (shown) {
-            //=> un show
-            display.clearBuffer();
-            display.render();
-            shown = false;
+    if (DEVICES::midButton.read() == LOW) { // mid(next) button
+        PLAYER::tasksIndex = (PLAYER::tasksIndex + 1) % tasksLength;
+        PLAYER::stop();
+        render_next();
+        render_play_stat();
+        plog_manual();
+        delay(250);
+    }
+    if (DEVICES::botButton.read() == LOW) { // bot(previous) button
+        if (PLAYER::tasksIndex == 0) {
+            PLAYER::tasksIndex = tasksLength - 1;
         } else {
-            //=> show
-            render_normal::layout();
-            render_normal::update_date(rtc.getTime(__DATE_F__).c_str());
-            render_normal::update_time(rtc.getTime(__TIME_F__).c_str());
-            render_normal::update_ip(WiFi.localIP().toString().c_str());
-            render_normal::update_next(tasks[taskIndex].name);
-            shown = true;
+            PLAYER::tasksIndex--;
         }
-        // debounce
-        delay(500);
+        render_next();
+        render_play_stat();
+        PLAYER::stop();
+        plog_manual();
+        delay(250);
     }
 }
-
-// ========================================================================== //
-// [definitions] debug mode
-void debug_mode_setup() {
-    plog("\n* debug-mode setup");
-    render_debug::layout();
-    render_debug::update_index(taskIndex);
-    render_debug::update_status(played);
+void setup() {
+    PLAYER::tasksIndex = 0;
+    PLAYER::playIntervals = 0;
+    plog_manual();
+    render_static();
+    render_next();
+    render_play_stat();
 }
-void debug_mode_service() {
-    delay(100);
-    if (topButton.read() == LOW) { // play and pause
-        if (played) {
-            mp3.stop();
-            play_i = 0;
-            played = false;
-        } else {
-            mp3.play(tasks[taskIndex].index);
-            play_ts = millis();
-            play_i = tasks[taskIndex].dura_sec * 1000;
-            played = true;
-        }
-        render_debug::update_status(played);
-    }
-    if (midButton.read() == LOW) { // next
-        taskIndex = (taskIndex + 1) % taskLen;
-        mp3.stop();
-        play_i = 0;
-        played = false;
-        render_debug::update_status(played);
-        render_debug::update_index(taskIndex);
-    }
-    if (botButton.read() == LOW) { // prev
-        if (taskIndex == 0) {
-            taskIndex = taskLen - 1;
-        } else {
-            taskIndex--;
-        }
-        mp3.stop();
-        play_i = 0;
-        played = false;
-        render_debug::update_status(played);
-        render_debug::update_index(taskIndex);
-    }
-    if (millis() - play_ts >= play_i && play_i != 0) {
-        mp3.stop();
-        play_i = 0;
-        played = false;
-        render_debug::update_status(played);
+void handle() {
+    handle_check_buttons();
+    PLAYER::handle_check_stop();
+}
+}; // namespace MANUAL_MODE
+
+void (*mode_setup)();
+void (*mode_handle)();
+void mode_select() {
+    DEVICES::
+        display
+            .clear()
+            .at(0, 0)
+            .add("MODE: ")
+            .render();
+    plog.use("\n* mode-select : %i");
+    uint8_t modeValue = DEVICES::topButton.read();
+    if (modeValue == LOW) {
+        DEVICES::display
+            .at(DEVICES::display.getPos())
+            .add("MANUAL-MODE")
+            .render();
+        plog("manual-mode", magenta);
+        mode_setup = MANUAL_MODE::setup;
+        mode_handle = MANUAL_MODE::handle;
+    } else {
+        DEVICES::display
+            .at(DEVICES::display.getPos())
+            .add("AUTO-MODE")
+            .render();
+        plog("auto-mode", magenta);
+        mode_setup = AUTO_MODE::setup;
+        mode_handle = AUTO_MODE::handle;
     }
 }
-
-// ========================================================================== //
-// [definitions] ota
+void connect_wifi() {
+    DEVICES::display
+        .at(DEVICES::display.getPos())
+        .addNewLine("SID: ")
+        .add(WIFI_SSID)
+        .addNewLine("IP: ")
+        .render();
+    plog.use("\n* wifi connect [%i] : %i")(WIFI_SSID, blue);
+    WiFi.disconnect();
+    while (WiFi.status() == WL_CONNECTED) {
+        delay(1000);
+    }
+    WiFi.begin(WIFI_SSID, WIFI_PSK);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        plog("can't connect", red);
+        DEVICES::errorLed.on();
+        while (1) {
+            delay(250);
+        }
+    } else {
+        plog(WiFi.localIP().toString().c_str(), green);
+    }
+    DEVICES::display
+        .add(WiFi.localIP().toString().c_str())
+        .render();
+}
 void ota_setup() {
-    ArduinoOTA.setHostname("SchoolAlarmDevice");
-    ArduinoOTA.setPasswordHash("bb0ea5d40d5897a0fc48aac9736ede19");
+    ArduinoOTA.setPasswordHash(OTA_AUTH_KEY);
     ArduinoOTA.onStart([]() {
-        esp_task_wdt_deinit();
-        display.clearBuffer();
-        display.add("! NEW FIRMWARE OTA", 0, 5, __WHITE__, 1);
-        display.render();
+        delay(1000);
+        DEVICES::display.clear()
+            .at(0, 0)
+            .add("! FIRMWARE UPDATING ...")
+            .render();
         String type;
         if (ArduinoOTA.getCommand() == U_FLASH) {
             type = "sketch";
@@ -331,6 +366,7 @@ void ota_setup() {
         Serial.println("\nEnd");
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        esp_task_wdt_reset();
         Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
     });
     ArduinoOTA.onError([](ota_error_t error) {
@@ -349,122 +385,35 @@ void ota_setup() {
     });
     ArduinoOTA.begin();
 }
-void ota_service() {
+void ota_handle() {
     ArduinoOTA.handle();
 }
 
-// ========================================================================== //
-// [definitions] helper
-void clock_update() {
-    plog("\n* updating clock");
-    HTTPClient http;
-    // fetch
-    http.begin(TIME_SERVER);
-    int resCode;
-    for (size_t i = 0; i < TIME_SERVER_ATTEMP; i++) {
-        resCode = http.GET();
-        delay(1000);
-        if (resCode == 200) {
-            break;
-        }
-    }
-    StaticJsonDocument<512> jsonDoc;
-    deserializeJson(jsonDoc, http.getString());
-    rtc.setTime(
-        jsonDoc["seconds"],
-        jsonDoc["minute"],
-        jsonDoc["hour"],
-        jsonDoc["day"],
-        jsonDoc["month"],
-        jsonDoc["year"]);
-}
-Time get_current_time() {
-    return {rtc.getHour(true), rtc.getMinute(), rtc.getSecond()};
-}
-void plog_task_table() {
-    plog("\n* tasks table");
-    for (size_t i = 0; i < taskLen; i++) {
-        SoundTask t = tasks[i];
-        if (taskIndex == i) {
-            plog("\n-->", red);
-        } else {
-            plog("\n   ");
-        }
-        plog.use("[ @ %i:%i:%i play-index %i for %i sec ]--- %i")
-            .print(t.time.hr, green, 2)(t.time.min, green, 2)(t.time.sec, green, 2)
-            .print(t.index, green, 2)
-            .print(t.dura_sec, green, 3)
-            .print(t.name, green);
-    }
-}
-void stop_task() {
-    // stop current playing
-    mp3.stop();
-    // set parameter
-    play_i = 0;
-}
-
-// ========================================================================== //
-// run time
+//------------------------------------------------------------------------------ [run time]
 void setup() {
-    Serial.begin(115200);
-    mp3.begin(9600);
-    mp3.sendCommand(CMD_SEL_DEV, 0, 2);
-    mp3.setVol(30);
-    errorLed.setup(LOW);
-    topButton.setup();
-    midButton.setup();
-    botButton.setup();
-    ssd.begin(SSD1306_SWITCHCAPVCC, 0x3c);
-    ssd.setFont(&Font5x5Fixed);
-    ssd.setTextWrap(false);
-    // mode selection
-    render_setup::layout();
-    uint8_t modeReaded = topButton.read();
-    if (modeReaded == LOW) { // pushed => debug-mode
-        plog("\n* debug-mode", magenta);
-        render_setup::update_mode("debug");
-        mode_setup = debug_mode_setup;
-        mode_service = debug_mode_service;
-    } else {
-        plog("\n* normal-mode", magenta);
-        render_setup::update_mode("normal");
-        mode_setup = normal_mode_setup;
-        mode_service = normal_mode_service;
-    }
-    // connect wifi
-    render_setup::update_ssid();
-    plog.use("\n* connecting {%i, %i} ")(WIFI_SSID, green)(WIFI_PSK, green);
-    WiFi.disconnect();
-    while (WiFi.status() == WL_CONNECTED) {
-        delay(100);
-    }
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PSK);
-    if (WiFi.waitForConnectResult() != WL_CONNECTED) {
-        plog("\n! can't connnect wifi", red);
-        errorLed.on();
-        delay(5000);
-        ESP.restart();
-    }
-    render_setup::update_ip(WiFi.localIP().toString().c_str());
-    plog.use("\n* ip -> %i")(WiFi.localIP().toString().c_str(), green);
-    delay(2000);
-    // ota setup
+    DEVICES::setup();
+    DEVICES::display.clear()
+        .at(0, 0)
+        .prop(COLOR_WHITE, 1)
+        .add("SCHOOL-ALARM-V2")
+        .render();
+    delay(1000);
+    plog("\n* (1) : mode select", blue);
+    mode_select();
+    plog("\n* (2) : connect to wifi", blue);
+    connect_wifi();
+    plog("\n* (3) : ota setup", blue);
     ota_setup();
-    // mode setup
+    plog("\n* (4) : mode setup", blue);
     mode_setup();
-    // set watchdog
-    esp_task_wdt_init(LOOP_TIMEOUT, true);
+    // set watch dog
+    esp_task_wdt_init(WDT_HANDLE_SEC, true);
     esp_task_wdt_add(NULL);
 }
+
 void loop() {
-    // mode service
-    mode_service();
-    // ota service
-    ota_service();
-    // reset watchdog
+    ota_handle();
+    mode_handle();
+    // reset watch dog
     esp_task_wdt_reset();
 }
-
-//!------------------------------------------------------------------------------ [end]

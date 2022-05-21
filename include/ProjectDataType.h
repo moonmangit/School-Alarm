@@ -1,6 +1,3 @@
-#ifndef __PROJECTDATATYPE__H__
-#define __PROJECTDATATYPE__H__
-
 #include <Arduino.h>
 
 typedef unsigned long stamp_t;
@@ -18,8 +15,7 @@ struct Time {
 
 struct SoundTask {
     Time time;
-    uint16_t index, dura_sec;
+    uint8_t index;
+    stamp_t duration;
     const char *name;
 };
-
-#endif //!__PROJECTDATATYPE__H__
